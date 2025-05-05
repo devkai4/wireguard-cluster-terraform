@@ -1,13 +1,13 @@
 provider "aws" {
-    region = "ap-northeast-1"
-    profile = "vpn-project"
+  region  = var.aws_region
+  profile = "vpn-project"
 }
 
 # Generate a random suffix for uniqueness
 resource "random_string" "bucket_suffix" {
-  length = 8
+  length  = 8
   special = false
-  upper = false
+  upper   = false
 }
 
 # S3 bucket for Terraform state
@@ -15,9 +15,9 @@ resource "aws_s3_bucket" "terraform_state" {
   bucket = "vpn-cluster-tfstate-${random_string.bucket_suffix.result}"
 
   tags = {
-    Name = "Terraform State"
-    Environment = "Global"
-    Project = "VPN-Cluster"
+    Name        = "Terraform State"
+    Environment = var.environment
+    Project     = var.project_name
   }
 }
 
@@ -40,13 +40,13 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "terraform_state_e
   }
 }
 
-# Block all public access to the bucket 
+# Block all public access to the bucket
 resource "aws_s3_bucket_public_access_block" "terraform_state_public_access_block" {
   bucket = aws_s3_bucket.terraform_state.id
 
-  block_public_acls = true
-  block_public_policy = true
-  ignore_public_acls = true
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
   restrict_public_buckets = true
 }
 
