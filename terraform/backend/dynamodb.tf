@@ -11,6 +11,6 @@ resource "aws_dynamodb_table" "terraform_state_lock" {
   tags = {
     Name        = "Terraform State Lock"
     Environment = "Global"
-    Project     = "VPN-Cluster"
+    Project     = var.project_name
   }
 }
