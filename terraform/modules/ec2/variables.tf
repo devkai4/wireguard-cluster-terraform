@@ -27,8 +27,8 @@ variable "instance_name" {
 variable "ami_id" {
   description = "AMI ID for the EC2 instance (Ubuntu 22.04 LTS)"
   type        = string
-  # Default to Ubuntu 22.04 LTS in us-east-1 (update for your region)
-  default     = "ami-0557a15b87f6559cf"
+  # Default to Ubuntu 22.04 LTS in ap-northeast-1 (Tokyo region)
+  default     = "ami-0ed99df77a82560e6"  # Ubuntu 22.04 LTS in ap-northeast-1
 }
 
 variable "instance_type" {
