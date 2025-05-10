@@ -34,8 +34,8 @@ The VPN cluster consists of:
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/yourusername/vpn-cluster-project.git
-   cd vpn-cluster-project
+   git clone https://github.com/yourusername/wireguard-cluster-terraform.git
+   cd wireguard-cluster-terraform
    ```
 
 2. **Initialize Terraform**
