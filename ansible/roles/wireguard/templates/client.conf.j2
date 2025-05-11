@@ -1,0 +1,11 @@
+# WireGuard Client Configuration
+[Interface]
+PrivateKey = CLIENT_PRIVATE_KEY
+Address = CLIENT_IP
+DNS = {{ wireguard_dns }}
+
+[Peer]
+PublicKey = {{ server_public_key.stdout }}
+Endpoint = SERVER_PUBLIC_IP:{{ wireguard_port }}
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25

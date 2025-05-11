@@ -1,0 +1,33 @@
+---
+# WireGuard default variables
+
+# Server configuration
+wireguard_port: 51820
+wireguard_interface: wg0
+wireguard_address: "10.8.0.1/24"
+wireguard_network: "10.8.0.0/24"
+
+# Network configuration
+wireguard_postup_rules:
+  - "iptables -A FORWARD -i %i -j ACCEPT"
+  - "iptables -A FORWARD -o %i -j ACCEPT"
+  - "iptables -t nat -A POSTROUTING -s {{ wireguard_network }} -o eth0 -j MASQUERADE"
+wireguard_postdown_rules:
+  - "iptables -D FORWARD -i %i -j ACCEPT"
+  - "iptables -D FORWARD -o %i -j ACCEPT"
+  - "iptables -t nat -D POSTROUTING -s {{ wireguard_network }} -o eth0 -j MASQUERADE"
+
+# DNS settings
+wireguard_dns: "1.1.1.1, 8.8.8.8"
+
+# Firewall
+enable_ufw: false
+
+# Client settings - will be empty by default and can be overridden
+wireguard_clients: []
+# Example:
+# wireguard_clients:
+#   - name: client1
+#     ip: "10.8.0.2/24"
+#   - name: client2
+#     ip: "10.8.0.3/24"

@@ -1,0 +1,15 @@
+# WireGuard Server Configuration
+[Interface]
+Address = {{ wireguard_address }}
+ListenPort = {{ wireguard_port }}
+PrivateKey = {{ server_private_key.stdout }}
+
+{% for rule in wireguard_postup_rules %}
+PostUp = {{ rule }}
+{% endfor %}
+
+{% for rule in wireguard_postdown_rules %}
+PostDown = {{ rule }}
+{% endfor %}
+
+# Client configurations will be added below by the client generation script
