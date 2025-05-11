@@ -131,4 +131,22 @@ fi
 # Additional setup scripts
 ${additional_user_data}
 
-echo "Server setup completed!"
+echo "Server setup completed!"# WireGuard Installation (Basic setup, will be configured fully with Ansible)
+if [ "${install_wireguard}" = "true" ]; then
+    # Install WireGuard
+    apt-get install -y wireguard wireguard-tools
+
+    # Enable IP forwarding
+    echo "net.ipv4.ip_forward = 1" > /etc/sysctl.d/99-wireguard.conf
+    sysctl -p /etc/sysctl.d/99-wireguard.conf
+    
+    # Make sure WireGuard directory exists with proper permissions
+    mkdir -p /etc/wireguard
+    chmod 700 /etc/wireguard
+    
+    # Generate initial keys
+    wg genkey | tee /etc/wireguard/server_private_key | wg pubkey > /etc/wireguard/server_public_key
+    chmod 600 /etc/wireguard/server_private_key
+    
+    echo "WireGuard basic installation completed. Full configuration will be done with Ansible."
+fi

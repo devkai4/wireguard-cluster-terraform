@@ -1,0 +1,110 @@
+---
+# WireGuard installation and configuration tasks
+
+- name: Update apt cache
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+  become: true
+
+- name: Install required packages
+  apt:
+    name:
+      - wireguard
+      - wireguard-tools
+      - qrencode
+    state: present
+  become: true
+
+- name: Create WireGuard directory
+  file:
+    path: /etc/wireguard
+    state: directory
+    mode: '0700'
+  become: true
+
+- name: Upload WireGuard setup script
+  copy:
+    src: wireguard-setup.sh
+    dest: /usr/local/bin/wireguard-setup.sh
+    mode: '0755'
+  become: true
+
+- name: Upload client config generation script
+  copy:
+    src: gen-client-config.sh
+    dest: /usr/local/bin/gen-client-config.sh
+    mode: '0755'
+  become: true
+
+- name: Generate server private key
+  shell: wg genkey
+  register: server_private_key
+  args:
+    creates: /etc/wireguard/server_private_key
+  become: true
+  no_log: true
+
+- name: Save server private key
+  copy:
+    content: "{{ server_private_key.stdout }}"
+    dest: /etc/wireguard/server_private_key
+    mode: '0600'
+  become: true
+  no_log: true
+
+- name: Generate server public key
+  shell: echo "{{ server_private_key.stdout }}" | wg pubkey
+  register: server_public_key
+  become: true
+
+- name: Save server public key
+  copy:
+    content: "{{ server_public_key.stdout }}"
+    dest: /etc/wireguard/server_public_key
+    mode: '0644'
+  become: true
+
+- name: Create WireGuard interface configuration
+  template:
+    src: wg0.conf.j2
+    dest: /etc/wireguard/wg0.conf
+    mode: '0600'
+  become: true
+  notify: Restart WireGuard
+
+- name: Enable WireGuard service
+  systemd:
+    name: wg-quick@wg0
+    enabled: yes
+    state: started
+  become: true
+
+- name: Enable IP forwarding
+  sysctl:
+    name: net.ipv4.ip_forward
+    value: '1'
+    state: present
+    reload: yes
+  become: true
+
+- name: Set up UFW for WireGuard
+  ufw:
+    rule: allow
+    port: "{{ wireguard_port }}"
+    proto: udp
+  become: true
+  when: enable_ufw | bool
+
+- name: Create client config directory
+  file:
+    path: /etc/wireguard/clients
+    state: directory
+    mode: '0700'
+  become: true
+
+- name: Generate client configurations for predefined clients
+  shell: /usr/local/bin/gen-client-config.sh "{{ item.name }}" "{{ item.ip }}"
+  loop: "{{ wireguard_clients }}"
+  when: wireguard_clients is defined
+  become: true

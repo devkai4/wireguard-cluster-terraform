@@ -1,0 +1,19 @@
+---
+# Playbook to set up WireGuard VPN Server
+
+- name: Set up WireGuard VPN Server
+  hosts: vpn_servers
+  become: true
+  vars:
+    wireguard_port: 51820
+    wireguard_address: "10.8.0.1/24"
+    wireguard_network: "10.8.0.0/24"
+    enable_ufw: false
+    wireguard_clients:
+      - name: admin-laptop
+        ip: "10.8.0.2/24"
+      - name: admin-phone
+        ip: "10.8.0.3/24"
+
+  roles:
+    - wireguard
