@@ -15,7 +15,7 @@ variable "aws_profile" {
 variable "vpn_server_ami_id" {
   description = "AMI ID for the VPN server (Ubuntu 22.04 LTS in Tokyo region)"
   type        = string
-  default     = "ami-0bc4853c891c551f8"
+  default     = "ami-07b3f199a3bed006a"
 }
 
 # Availability Zones for Tokyo region
