@@ -11,11 +11,11 @@ wireguard_network: "10.8.0.0/24"
 wireguard_postup_rules:
   - "iptables -A FORWARD -i %i -j ACCEPT"
   - "iptables -A FORWARD -o %i -j ACCEPT"
-  - "iptables -t nat -A POSTROUTING -s {{ wireguard_network }} -o eth0 -j MASQUERADE"
+  - "iptables -t nat -A POSTROUTING -s {{ wireguard_network }} -o $(ip route | grep default | awk '{print $5}') -j MASQUERADE"
 wireguard_postdown_rules:
   - "iptables -D FORWARD -i %i -j ACCEPT"
   - "iptables -D FORWARD -o %i -j ACCEPT"
-  - "iptables -t nat -D POSTROUTING -s {{ wireguard_network }} -o eth0 -j MASQUERADE"
+  - "iptables -t nat -D POSTROUTING -s {{ wireguard_network }} -o $(ip route | grep default | awk '{print $5}') -j MASQUERADE"
 
 # DNS settings
 wireguard_dns: "1.1.1.1, 8.8.8.8"

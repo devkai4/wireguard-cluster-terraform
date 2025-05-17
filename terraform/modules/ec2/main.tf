@@ -1,5 +1,32 @@
 # EC2 Module for VPN Servers
 
+# Use datasource to get Ubuntu 22.04 LTS AMI
+data "aws_ami" "ubuntu" {
+  most_recent = true
+  owners      = ["099720109477"] # Canonical
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+
+  filter {
+    name   = "root-device-type"
+    values = ["ebs"]
+  }
+
+  filter {
+    name   = "architecture"
+    values = ["x86_64"]
+  }
+}
+
+
 # Generate a random suffix for uniqueness
 resource "random_string" "suffix" {
   length  = 8
@@ -76,7 +103,8 @@ locals {
 
 # EC2 Instance
 resource "aws_instance" "vpn_server" {
-  ami                    = var.ami_id
+  # Use the specified AMI ID, or use the AMI obtained from the data source if not specified.
+  ami                    = var.ami_id != "" ? var.ami_id : data.aws_ami.ubuntu.id
   instance_type          = var.instance_type
   key_name               = var.key_name
   vpc_security_group_ids = var.security_group_ids

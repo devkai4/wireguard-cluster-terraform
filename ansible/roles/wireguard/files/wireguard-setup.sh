@@ -36,4 +36,31 @@ sysctl -p /etc/sysctl.d/99-wireguard.conf
 systemctl enable wg-quick@wg0
 systemctl start wg-quick@wg0
 
+SERVER_PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || curl -s https://ifconfig.me)
+if [ -n "$SERVER_PUBLIC_IP" ]; then
+    echo "$SERVER_PUBLIC_IP" > /etc/wireguard/server_public_ip
+    chmod 644 /etc/wireguard/server_public_ip
+    echo "Saved server public IP: $SERVER_PUBLIC_IP"
+else
+    echo "Warning: Could not determine server public IP address"
+fi
+
+# サーバーの正しいネットワークインターフェースを特定
+WAN_IFACE=$(ip route | grep default | awk '{print $5}')
+if [ -z "$WAN_IFACE" ]; then
+    echo "Warning: Could not determine WAN interface, defaulting to eth0" >&2
+    WAN_IFACE="eth0"
+fi
+echo "Detected WAN interface: $WAN_IFACE"
+
+# サーバーのパブリックIPを取得して保存
+SERVER_PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || curl -s https://ifconfig.me)
+if [ -n "$SERVER_PUBLIC_IP" ]; then
+    echo "$SERVER_PUBLIC_IP" > /etc/wireguard/server_public_ip
+    chmod 644 /etc/wireguard/server_public_ip
+    echo "Saved server public IP: $SERVER_PUBLIC_IP"
+else
+    echo "Warning: Could not determine server public IP address"
+fi
+
 echo "WireGuard setup completed!"

@@ -20,3 +20,4 @@ terraform.tfvars
 .DS_Store
 Thumbs.db
 EOF
+admin-laptop.conf

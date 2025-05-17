@@ -108,3 +108,29 @@
   loop: "{{ wireguard_clients }}"
   when: wireguard_clients is defined
   become: true
+
+- name: Detect WAN interface
+  shell: ip route | grep default | awk '{print $5}'
+  register: wan_interface
+  changed_when: false
+  become: true
+
+- name: Set fact for WAN interface
+  set_fact:
+    detected_wan_interface: "{{ wan_interface.stdout | default('eth0') }}"
+
+- name: Replace WAN interface in config template
+  replace:
+    path: /etc/wireguard/wg0.conf
+    regexp: 'eth0'
+    replace: "{{ detected_wan_interface }}"
+  become: true
+  when: wan_interface.stdout != "" and wan_interface.stdout != "eth0"
+  notify: Restart WireGuard
+
+- name: Upload QR code display script
+  copy:
+    src: show-client-qr.sh
+    dest: /usr/local/bin/show-client-qr.sh
+    mode: '0755'
+  become: true

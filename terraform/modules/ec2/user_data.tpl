@@ -48,7 +48,7 @@ if [ "${install_cloudwatch_agent}" = "true" ]; then
   },
   "metrics": {
     "append_dimensions": {
-      "InstanceId": "\${aws:InstanceId}"
+      "InstanceId": "\$${aws:InstanceId}"
     },
     "metrics_collected": {
       "mem": {
