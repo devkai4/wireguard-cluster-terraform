@@ -134,3 +134,44 @@
     dest: /usr/local/bin/show-client-qr.sh
     mode: '0755'
   become: true
+
+- name: Get server public IP
+  shell: >
+    curl -s https://ifconfig.me || curl -s https://api.ipify.org || echo "Failed to determine public IP"
+  register: public_ip_result
+  changed_when: false
+  become: false
+  
+- name: Debug public IP
+  debug:
+    msg: "Detected public IP: {{ public_ip_result.stdout }}"
+
+- name: Check for clients with private IP endpoints
+  shell: >
+    grep -l 'Endpoint = 10\.' /etc/wireguard/clients/*.conf || 
+    grep -l 'Endpoint = 172\.' /etc/wireguard/clients/*.conf || 
+    grep -l 'Endpoint = 192\.168\.' /etc/wireguard/clients/*.conf || true
+  register: private_ip_configs
+  changed_when: false
+  become: true
+  failed_when: false
+
+- name: Fix client configurations with private IP endpoints
+  replace:
+    path: "{{ item }}"
+    regexp: 'Endpoint = (10\.|172\.|192\.168\.)[0-9]+\.[0-9]+\.[0-9]+:'
+    replace: 'Endpoint = {{ public_ip_result.stdout }}:'
+  with_items: "{{ private_ip_configs.stdout_lines }}"
+  when: 
+    - private_ip_configs.stdout_lines | length > 0
+    - public_ip_result.stdout != "Failed to determine public IP"
+    - not public_ip_result.stdout is regex("^(10\.|172\.|192\.168\.)")
+  become: true
+  register: fixed_configs
+
+- name: Regenerate QR codes for fixed configurations
+  shell: >
+    qrencode -t ansiutf8 < "{{ item }}" > "{{ item }}.qrcode.txt"
+  with_items: "{{ private_ip_configs.stdout_lines }}"
+  when: fixed_configs.changed
+  become: true
