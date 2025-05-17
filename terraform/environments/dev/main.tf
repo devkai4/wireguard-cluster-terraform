@@ -1,3 +1,29 @@
+provider "aws" {
+  region  = var.region
+  profile = var.aws_profile
+}
+
+# VPC Module
+module "vpc" {
+  source = "../../modules/vpc"
+
+  # VPC Configuration
+  vpc_name             = "${var.project}-${var.environment}-vpc"
+  vpc_cidr             = var.vpc_cidr
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+
+  # Availability Zones and Subnets
+  availability_zones     = var.availability_zones
+  public_subnet_cidrs    = var.public_subnet_cidrs
+  private_subnet_cidrs   = var.private_subnet_cidrs
+
+  # Tags
+  environment = var.environment
+  project     = var.project
+  owner       = var.owner
+}
+
 # Use EC2 Module for VPN Server
 module "vpn_server" {
   source = "../../modules/ec2"
