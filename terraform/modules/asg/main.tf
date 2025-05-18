@@ -1,4 +1,4 @@
-# Auto Scaling Group Module - Fixed user_data handling
+# Auto Scaling Group Module - Fixed conditional syntax
 
 # Use datasource to get Ubuntu 22.04 LTS AMI
 data "aws_ami" "ubuntu" {
@@ -95,6 +95,13 @@ resource "aws_iam_role_policy_attachment" "cloudwatch_policy" {
   policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
 }
 
+# Attach EFS policy to IAM role if shared storage is enabled
+resource "aws_iam_role_policy_attachment" "efs_policy" {
+  count      = var.create_iam_role && var.enable_shared_storage ? 1 : 0
+  role       = aws_iam_role.ec2_role[0].name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonElasticFileSystemClientReadWriteAccess"
+}
+
 # Attach additional IAM policies
 resource "aws_iam_role_policy_attachment" "additional_policies" {
   count      = var.create_iam_role ? length(var.iam_policies) : 0
@@ -104,7 +111,27 @@ resource "aws_iam_role_policy_attachment" "additional_policies" {
 
 # User data - Use a simpler approach to avoid templatefile issues
 locals {
-  # Use pre-defined simple script to avoid templatefile issues
+  # Create shared storage script based on enable_shared_storage flag
+  shared_storage_script = var.enable_shared_storage ? <<-EOF
+# Setup shared storage with EFS
+echo "Setting up shared storage with EFS ID: ${var.efs_id}"
+mkdir -p /mnt/efs
+
+# Mount EFS
+echo "${var.efs_id}:/ /mnt/efs efs _netdev,tls,iam 0 0" >> /etc/fstab
+mount -a
+
+# Create WireGuard directory in EFS if it doesn't exist
+mkdir -p /mnt/efs/wireguard
+
+# Symlink WireGuard directory to EFS mount
+ln -sf /mnt/efs/wireguard /etc/wireguard
+
+echo "EFS mounted successfully"
+EOF
+  : ""
+
+  # Default user data script with conditionally included shared storage script
   default_user_data = <<-EOF
 #!/bin/bash
 # Initial server setup for VPN server in Auto Scaling Group
@@ -156,18 +183,23 @@ echo "Fail2ban configured and restarted"
 echo "net.ipv4.ip_forward = 1" > /etc/sysctl.d/99-wireguard.conf
 sysctl -p /etc/sysctl.d/99-wireguard.conf
 
-# Create wireguard directories
-mkdir -p /etc/wireguard/clients
-chmod 700 /etc/wireguard
+${var.enable_shared_storage ? local.shared_storage_script : "# No shared storage configured"}
 
-# Generate WireGuard keys
-wg genkey | tee /etc/wireguard/server_private_key | wg pubkey > /etc/wireguard/server_public_key
-chmod 600 /etc/wireguard/server_private_key
-chmod 644 /etc/wireguard/server_public_key
+# Create wireguard directories if not using shared storage
+if [ ! -d "/etc/wireguard" ]; then
+  mkdir -p /etc/wireguard/clients
+  chmod 700 /etc/wireguard
+fi
 
-# Create initial WireGuard config
-SERVER_PRIVATE_KEY=$(cat /etc/wireguard/server_private_key)
-cat > /etc/wireguard/wg0.conf << EOFWG
+# Generate WireGuard keys if they don't exist
+if [ ! -f "/etc/wireguard/server_private_key" ]; then
+  wg genkey | tee /etc/wireguard/server_private_key | wg pubkey > /etc/wireguard/server_public_key
+  chmod 600 /etc/wireguard/server_private_key
+  chmod 644 /etc/wireguard/server_public_key
+  
+  # Create initial WireGuard config
+  SERVER_PRIVATE_KEY=$(cat /etc/wireguard/server_private_key)
+  cat > /etc/wireguard/wg0.conf << EOFWG
 # WireGuard Server Configuration
 [Interface]
 Address = 10.8.0.1/24
@@ -184,6 +216,7 @@ PostDown = iptables -D FORWARD -i %i -j ACCEPT
 PostDown = iptables -D FORWARD -o %i -j ACCEPT
 PostDown = iptables -t nat -D POSTROUTING -s ${var.wireguard_network} -o $(ip route | grep default | awk '{print $5}') -j MASQUERADE
 EOFWG
+fi
 
 # Start WireGuard
 systemctl enable wg-quick@wg0
