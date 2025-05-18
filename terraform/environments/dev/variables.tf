@@ -1,3 +1,5 @@
+# Dev Environment Variables - Updated for High Availability
+
 variable "region" {
   description = "AWS region"
   type        = string
@@ -11,7 +13,6 @@ variable "aws_profile" {
 }
 
 # EC2 Variables
-# AMI ID for Tokyo region (ap-northeast-1)
 variable "vpn_server_ami_id" {
   description = "AMI ID for the VPN server (Ubuntu 22.04 LTS in Tokyo region)"
   type        = string
@@ -36,6 +37,7 @@ variable "ssh_key_name" {
   type        = string
   default     = null  # Will need to be set in terraform.tfvars
 }
+
 # WireGuard Variables
 variable "wireguard_port" {
   description = "UDP port for WireGuard"
@@ -83,4 +85,49 @@ variable "private_subnet_cidrs" {
   description = "CIDR blocks for private subnets"
   type        = list(string)
   default     = ["10.0.11.0/24", "10.0.12.0/24", "10.0.13.0/24"]
+}
+
+variable "management_subnet_cidrs" {
+  description = "CIDR blocks for management subnets"
+  type        = list(string)
+  default     = ["10.0.21.0/24", "10.0.22.0/24", "10.0.23.0/24"]
+}
+
+# Auto Scaling Group Variables
+variable "asg_min_size" {
+  description = "Minimum number of instances in the Auto Scaling Group"
+  type        = number
+  default     = 1
+}
+
+variable "asg_max_size" {
+  description = "Maximum number of instances in the Auto Scaling Group"
+  type        = number
+  default     = 3
+}
+
+variable "asg_desired_capacity" {
+  description = "Desired number of instances in the Auto Scaling Group"
+  type        = number
+  default     = 2
+}
+
+# Scaling Thresholds
+variable "network_in_high_threshold" {
+  description = "Network inbound threshold to scale out (bytes per second)"
+  type        = number
+  default     = 10000000  # 10 MB/s
+}
+
+variable "network_in_low_threshold" {
+  description = "Network inbound threshold to scale in (bytes per second)"
+  type        = number
+  default     = 2000000   # 2 MB/s
+}
+
+# Shared Storage
+variable "enable_shared_storage" {
+  description = "Enable shared storage using EFS for WireGuard configuration"
+  type        = bool
+  default     = true
 }

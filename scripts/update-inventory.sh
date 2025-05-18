@@ -25,7 +25,7 @@ all:
         vpn-server-1:
           ansible_host: ${VPN_PUBLIC_IP}
           ansible_user: ubuntu
-          ansible_ssh_private_key_file: "~/.ssh/vpn-cluster-key.pem"
+          ansible_ssh_private_key_file: "~/.ssh/vpn-cluster-new-key.pem"
   vars:
     ansible_python_interpreter: /usr/bin/python3
 EOF

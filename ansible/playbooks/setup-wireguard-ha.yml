@@ -1,0 +1,122 @@
+---
+# Playbook to set up WireGuard VPN Server in High Availability Mode
+
+- name: Set up WireGuard VPN Server (HA Mode)
+  hosts: vpn_servers
+  become: true
+  vars:
+    wireguard_port: 51820
+    wireguard_address: "10.8.0.1/24"
+    wireguard_network: "10.8.0.0/24"
+    enable_ufw: false
+    ha_mode: true
+    enable_shared_storage: true
+    efs_mount_point: "/mnt/efs"
+    wireguard_clients:
+      - name: admin-laptop
+        ip: "10.8.0.2/24"
+      - name: admin-phone
+        ip: "10.8.0.3/24"
+
+  tasks:
+    - name: Include WireGuard role
+      include_role:
+        name: wireguard
+
+    - name: Check if WireGuard is running properly
+      command: wg show
+      register: wireguard_status
+      changed_when: false
+      failed_when: false
+
+    - name: Display WireGuard status
+      debug:
+        var: wireguard_status.stdout_lines
+
+    # Additional HA-specific tasks
+    - name: Check if EFS is mounted
+      stat:
+        path: "{{ efs_mount_point }}/wireguard"
+      register: efs_mount_stat
+      when: ha_mode and enable_shared_storage
+
+    - name: Report EFS mount status
+      debug:
+        msg: "EFS is {{ 'mounted' if efs_mount_stat.stat.exists else 'not mounted' }}"
+      when: ha_mode and enable_shared_storage
+
+    - name: Ensure all client configurations are properly synced
+      shell: ls -la /etc/wireguard/clients/
+      register: client_configs
+      changed_when: false
+      when: ha_mode
+
+    - name: Display client configuration status
+      debug:
+        var: client_configs.stdout_lines
+      when: ha_mode
+
+    - name: Create health check script for HA environment
+      template:
+        src: templates/ha-health-check.sh.j2
+        dest: /usr/local/bin/ha-health-check.sh
+        mode: '0755'
+      when: ha_mode
+
+    - name: Setup cron job for health checks
+      cron:
+        name: "WireGuard HA health check"
+        minute: "*/5"
+        job: "/usr/local/bin/ha-health-check.sh >> /var/log/wireguard-ha-health.log 2>&1"
+      when: ha_mode
+
+    - name: Create NLB endpoint file for client configurations
+      template:
+        src: templates/nlb_endpoint.j2
+        dest: /etc/wireguard/nlb_endpoint
+        mode: '0644'
+      when: ha_mode and inventory_hostname == groups['vpn_servers'][0]
+
+    - name: Register load balancer endpoint with all nodes
+      shell: |
+        if [ -f /etc/wireguard/nlb_endpoint ]; then
+          NLB_ENDPOINT=$(cat /etc/wireguard/nlb_endpoint)
+          echo "Using NLB endpoint: $NLB_ENDPOINT"
+          
+          # Update any client configs to use the NLB endpoint
+          for CONFIG in /etc/wireguard/clients/*.conf; do
+            if [ -f "$CONFIG" ]; then
+              CURRENT_ENDPOINT=$(grep "Endpoint =" "$CONFIG" | awk '{print $3}')
+              CURRENT_PORT=$(echo "$CURRENT_ENDPOINT" | cut -d ':' -f2)
+              
+              if [ -n "$CURRENT_PORT" ]; then
+                NEW_ENDPOINT="$NLB_ENDPOINT:$CURRENT_PORT"
+                sed -i "s|Endpoint = .*|Endpoint = $NEW_ENDPOINT|" "$CONFIG"
+                echo "Updated endpoint in $CONFIG to $NEW_ENDPOINT"
+                
+                # Regenerate QR code if needed
+                if command -v qrencode &> /dev/null; then
+                  qrencode -t ansiutf8 < "$CONFIG" > "${CONFIG}.qrcode.txt"
+                fi
+              fi
+            fi
+          done
+        else
+          echo "NLB endpoint file not found"
+        fi
+      register: update_endpoints
+      changed_when: update_endpoints.rc == 0
+      when: ha_mode
+
+    - name: Display endpoint update results
+      debug:
+        var: update_endpoints.stdout_lines
+      when: ha_mode and update_endpoints is defined
+
+    - name: Ensure all instances use consistent firewall rules
+      shell: |
+        iptables -C FORWARD -i wg0 -j ACCEPT || iptables -A FORWARD -i wg0 -j ACCEPT
+        iptables -C FORWARD -o wg0 -j ACCEPT || iptables -A FORWARD -o wg0 -j ACCEPT
+        iptables-save | grep -q "POSTROUTING -s {{ wireguard_network }} -o" || iptables -t nat -A POSTROUTING -s {{ wireguard_network }} -o $(ip route | grep default | awk '{print $5}') -j MASQUERADE
+      changed_when: false
+      when: ha_mode
