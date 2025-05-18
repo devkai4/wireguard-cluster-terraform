@@ -1,4 +1,4 @@
-# Auto Scaling Group Module - Fixed conditional syntax
+# Auto Scaling Group Module - Simplified user data handling
 
 # Use datasource to get Ubuntu 22.04 LTS AMI
 data "aws_ami" "ubuntu" {
@@ -110,31 +110,125 @@ resource "aws_iam_role_policy_attachment" "additional_policies" {
 }
 
 # User data - Use a simpler approach to avoid templatefile issues
+# Create two separate user data scripts based on whether shared storage is enabled
 locals {
-  # Create shared storage script based on enable_shared_storage flag
-  shared_storage_script = var.enable_shared_storage ? <<-EOF
-# Setup shared storage with EFS
-echo "Setting up shared storage with EFS ID: ${var.efs_id}"
-mkdir -p /mnt/efs
-
-# Mount EFS
-echo "${var.efs_id}:/ /mnt/efs efs _netdev,tls,iam 0 0" >> /etc/fstab
-mount -a
-
-# Create WireGuard directory in EFS if it doesn't exist
-mkdir -p /mnt/efs/wireguard
-
-# Symlink WireGuard directory to EFS mount
-ln -sf /mnt/efs/wireguard /etc/wireguard
-
-echo "EFS mounted successfully"
-EOF
-  : ""
-
-  # Default user data script with conditionally included shared storage script
-  default_user_data = <<-EOF
+  user_data_no_efs = <<-EOF
 #!/bin/bash
 # Initial server setup for VPN server in Auto Scaling Group
+
+set -e
+
+# Log setup progress
+exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+echo "Starting VPN server setup script - $(date)"
+
+# Update and install required packages
+apt-get update
+apt-get upgrade -y
+apt-get install -y \
+    apt-transport-https \
+    ca-certificates \
+    curl \
+    gnupg-agent \
+    software-properties-common \
+    fail2ban \
+    jq \
+    unzip \
+    wireguard \
+    wireguard-tools \
+    qrencode
+
+# Set up hostname with instance ID for better identification
+INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+hostnamectl set-hostname ${var.instance_name}-$INSTANCE_ID
+
+# Configure fail2ban
+cat > /etc/fail2ban/jail.local << EOFAIL2BAN
+[sshd]
+enabled = true
+port = ssh
+filter = sshd
+logpath = /var/log/auth.log
+maxretry = 3
+bantime = 3600
+EOFAIL2BAN
+
+# Restart fail2ban
+systemctl restart fail2ban
+echo "Fail2ban configured and restarted"
+
+# Enable IP forwarding for WireGuard
+echo "net.ipv4.ip_forward = 1" > /etc/sysctl.d/99-wireguard.conf
+sysctl -p /etc/sysctl.d/99-wireguard.conf
+
+# Standard local storage setup
+mkdir -p /etc/wireguard/clients
+chmod 700 /etc/wireguard
+
+# Generate WireGuard keys
+wg genkey | tee /etc/wireguard/server_private_key | wg pubkey > /etc/wireguard/server_public_key
+chmod 600 /etc/wireguard/server_private_key
+chmod 644 /etc/wireguard/server_public_key
+
+# Create initial WireGuard config
+SERVER_PRIVATE_KEY=$(cat /etc/wireguard/server_private_key)
+cat > /etc/wireguard/wg0.conf << EOFWG
+# WireGuard Server Configuration
+[Interface]
+Address = 10.8.0.1/24
+ListenPort = ${var.wireguard_port}
+PrivateKey = $SERVER_PRIVATE_KEY
+
+# PostUp rules
+PostUp = iptables -A FORWARD -i %i -j ACCEPT
+PostUp = iptables -A FORWARD -o %i -j ACCEPT
+PostUp = iptables -t nat -A POSTROUTING -s ${var.wireguard_network} -o $(ip route | grep default | awk '{print $5}') -j MASQUERADE
+
+# PostDown rules
+PostDown = iptables -D FORWARD -i %i -j ACCEPT
+PostDown = iptables -D FORWARD -o %i -j ACCEPT
+PostDown = iptables -t nat -D POSTROUTING -s ${var.wireguard_network} -o $(ip route | grep default | awk '{print $5}') -j MASQUERADE
+EOFWG
+
+# Start WireGuard
+systemctl enable wg-quick@wg0
+systemctl start wg-quick@wg0
+echo "WireGuard setup completed"
+
+# Create health check script
+cat > /usr/local/bin/wireguard-health-check.sh << 'EOFHC'
+#!/bin/bash
+# Simple health check for WireGuard
+
+# Check if WireGuard interface is up
+if ! ip a show wg0 up > /dev/null 2>&1; then
+    echo "WireGuard interface not up, restarting..."
+    systemctl restart wg-quick@wg0
+    exit 1
+fi
+
+# Check if WireGuard is working
+if ! wg show wg0 > /dev/null 2>&1; then
+    echo "WireGuard not responding, restarting..."
+    systemctl restart wg-quick@wg0
+    exit 1
+fi
+
+echo "WireGuard is running normally"
+exit 0
+EOFHC
+
+chmod +x /usr/local/bin/wireguard-health-check.sh
+
+# Set up cron job for health check
+(crontab -l 2>/dev/null; echo "*/5 * * * * /usr/local/bin/wireguard-health-check.sh > /dev/null 2>&1") | crontab -
+
+echo "VPN server setup completed successfully - $(date)"
+EOF
+
+  user_data_with_efs = <<-EOF
+#!/bin/bash
+# Initial server setup for VPN server in Auto Scaling Group with EFS
 
 set -e
 
@@ -183,15 +277,29 @@ echo "Fail2ban configured and restarted"
 echo "net.ipv4.ip_forward = 1" > /etc/sysctl.d/99-wireguard.conf
 sysctl -p /etc/sysctl.d/99-wireguard.conf
 
-${var.enable_shared_storage ? local.shared_storage_script : "# No shared storage configured"}
+# Setup shared storage with EFS
+echo "Setting up shared storage with EFS ID: ${var.efs_id}"
+mkdir -p /mnt/efs
 
-# Create wireguard directories if not using shared storage
-if [ ! -d "/etc/wireguard" ]; then
-  mkdir -p /etc/wireguard/clients
-  chmod 700 /etc/wireguard
+# Mount EFS
+echo "${var.efs_id}:/ /mnt/efs efs _netdev,tls,iam 0 0" >> /etc/fstab
+mount -a || echo "Error mounting EFS - will try again"
+
+# Try again with a little delay if first mount fails
+if [ ! -d "/mnt/efs" ] || ! mountpoint -q /mnt/efs; then
+  sleep 10
+  mount -a
 fi
 
-# Generate WireGuard keys if they don't exist
+# Create WireGuard directory in EFS if it doesn't exist
+mkdir -p /mnt/efs/wireguard
+mkdir -p /mnt/efs/wireguard/clients
+
+# Symlink WireGuard directory to EFS mount
+ln -sf /mnt/efs/wireguard /etc/wireguard
+chmod 700 /etc/wireguard
+
+# Check if keys exist, create if they don't
 if [ ! -f "/etc/wireguard/server_private_key" ]; then
   wg genkey | tee /etc/wireguard/server_private_key | wg pubkey > /etc/wireguard/server_public_key
   chmod 600 /etc/wireguard/server_private_key
@@ -228,6 +336,12 @@ cat > /usr/local/bin/wireguard-health-check.sh << 'EOFHC'
 #!/bin/bash
 # Simple health check for WireGuard
 
+# Check if EFS is mounted
+if ! mountpoint -q /mnt/efs; then
+    echo "EFS not mounted, attempting to mount..."
+    mount -a
+fi
+
 # Check if WireGuard interface is up
 if ! ip a show wg0 up > /dev/null 2>&1; then
     echo "WireGuard interface not up, restarting..."
@@ -253,6 +367,9 @@ chmod +x /usr/local/bin/wireguard-health-check.sh
 
 echo "VPN server setup completed successfully - $(date)"
 EOF
+
+  # Choose user data based on enable_shared_storage flag
+  user_data = var.enable_shared_storage ? local.user_data_with_efs : local.user_data_no_efs
 }
 
 # Launch Template
@@ -260,7 +377,7 @@ resource "aws_launch_template" "vpn_server" {
   name          = "${var.instance_name}-${var.environment}-${random_string.suffix.result}"
   image_id      = var.ami_id != "" ? var.ami_id : data.aws_ami.ubuntu.id
   instance_type = var.instance_type
-  user_data     = var.user_data_base64 != null ? var.user_data_base64 : base64encode(local.default_user_data)
+  user_data     = var.user_data_base64 != null ? var.user_data_base64 : base64encode(local.user_data)
   key_name      = var.key_name
 
   # IAM role
