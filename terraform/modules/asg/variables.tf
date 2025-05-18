@@ -85,6 +85,12 @@ variable "use_spot_instances" {
 }
 
 # IAM Configuration
+variable "iam_role_name" {
+  description = "Name of the IAM role to attach to instances (if not creating a new one)"
+  type        = string
+  default     = null
+}
+
 variable "iam_instance_profile" {
   description = "IAM instance profile name to attach to instances"
   type        = string
@@ -207,31 +213,11 @@ variable "min_healthy_percentage" {
   default     = 90
 }
 
-# User Data Configuration
-variable "user_data_vars" {
-  description = "Variables to pass to the user data template"
-  type        = map(string)
-  default     = {}
-}
-
 # Tags
 variable "additional_tags" {
   description = "Additional tags for ASG resources"
   type        = map(string)
   default     = {}
-}
-
-# Shared State Configuration
-variable "enable_shared_storage" {
-  description = "Enable EFS shared storage for WireGuard configuration"
-  type        = bool
-  default     = false
-}
-
-variable "efs_id" {
-  description = "EFS ID for shared WireGuard configuration (if enable_shared_storage is true)"
-  type        = string
-  default     = ""
 }
 
 # WireGuard Configuration
@@ -245,4 +231,11 @@ variable "wireguard_network" {
   description = "Internal network CIDR for WireGuard"
   type        = string
   default     = "10.8.0.0/24"
+}
+
+# User data variables
+variable "user_data_vars" {
+  description = "Variables to pass to the user data script"
+  type        = map(string)
+  default     = {}
 }
