@@ -1,5 +1,4 @@
 # Dev Environment Outputs - Updated for High Availability with correct module attributes
-
 # VPC Outputs
 output "vpc_id" {
   description = "ID of the VPC"
@@ -37,9 +36,12 @@ output "vpn_endpoint" {
   value       = module.nlb.endpoint
 }
 
-# We're deliberately commenting out problematic outputs until the module is fully functional
-/*
 # Auto Scaling Group Outputs
+output "asg_name" {
+  description = "Name of the Auto Scaling Group for VPN servers"
+  value       = module.vpn_asg.asg_name
+}
+
 output "asg_id" {
   description = "ID of the Auto Scaling Group for VPN servers"
   value       = module.vpn_asg.asg_id
@@ -54,7 +56,6 @@ output "launch_template_version" {
   description = "Latest version of the Launch Template for VPN servers"
   value       = module.vpn_asg.launch_template_latest_version
 }
-*/
 
 # Shared Storage Outputs
 output "efs_id" {
@@ -71,9 +72,9 @@ output "efs_dns_name" {
 output "vpn_connection_info" {
   description = "Information for connecting to the VPN"
   value = {
-    endpoint    = module.nlb.endpoint
-    port        = var.wireguard_port
-    protocol    = "UDP (WireGuard)"
+    endpoint     = module.nlb.endpoint
+    port         = var.wireguard_port
+    protocol     = "UDP (WireGuard)"
     client_setup = "Use the gen-client-config.sh script on any VPN server to generate client configurations."
   }
 }

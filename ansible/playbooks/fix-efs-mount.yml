@@ -1,0 +1,261 @@
+---
+# EFS自動マウントプレイブック
+
+- name: Ensure EFS is properly mounted for WireGuard
+  hosts: vpn_servers
+  become: true
+  vars:
+    efs_id: "{{ hostvars['localhost']['efs_id'] | default(efs_id) }}"
+    efs_mount_point: "/mnt/efs"
+    wireguard_config_path: "/etc/wireguard"
+    
+  tasks:
+    - name: Get Terraform outputs for EFS details
+      delegate_to: localhost
+      become: false
+      shell: |
+        cd {{ playbook_dir }}/../../terraform/environments/{{ environment | default('dev') }}
+        terraform output -raw efs_id
+      register: terraform_efs_id
+      changed_when: false
+      failed_when: false
+      
+    - name: Set EFS ID from Terraform outputs if available
+      set_fact:
+        efs_id: "{{ terraform_efs_id.stdout }}"
+      when: terraform_efs_id.rc == 0 and terraform_efs_id.stdout != ""
+      
+    - name: Show EFS ID being used
+      debug:
+        msg: "Using EFS ID: {{ efs_id }}"
+      
+    - name: Ensure required packages are installed
+      apt:
+        name:
+          - nfs-common
+          - amazon-efs-utils
+        state: present
+        update_cache: yes
+        
+    - name: Create EFS mount point directory
+      file:
+        path: "{{ efs_mount_point }}"
+        state: directory
+        mode: '0755'
+        
+    - name: Check if EFS is already mounted
+      shell: mount | grep "{{ efs_mount_point }}"
+      register: efs_mounted
+      changed_when: false
+      failed_when: false
+        
+    - name: Get AWS region
+      shell: |
+        curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | grep region | cut -d\" -f4
+      register: aws_region
+      changed_when: false
+      
+    - name: Set region fact
+      set_fact:
+        region: "{{ aws_region.stdout }}"
+        
+    - name: Mount EFS with amazon-efs-utils
+      shell: |
+        mount -t efs -o tls "{{ efs_id }}":/ "{{ efs_mount_point }}"
+      register: efs_mount_result
+      failed_when: false
+      when: efs_mounted.rc != 0
+        
+    - name: Check if mount was successful
+      shell: mount | grep "{{ efs_mount_point }}"
+      register: mount_check
+      changed_when: false
+      failed_when: false
+      
+    - name: Fallback to NFS mount if EFS utils mount failed
+      shell: |
+        mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport "{{ efs_id }}.efs.{{ region }}.amazonaws.com":/ "{{ efs_mount_point }}"
+      when: efs_mounted.rc != 0 and mount_check.rc != 0
+      register: nfs_mount_result
+      failed_when: false
+      
+    - name: Confirm EFS mount
+      shell: mount | grep "{{ efs_mount_point }}"
+      register: final_mount_check
+      changed_when: false
+      failed_when: false
+      
+    - name: Report mount status
+      debug:
+        msg: "EFS mount status: {{ 'Successful' if final_mount_check.rc == 0 else 'Failed' }}"
+        
+    - name: Create WireGuard directory on EFS
+      file:
+        path: "{{ efs_mount_point }}/wireguard"
+        state: directory
+        mode: '0700'
+      when: final_mount_check.rc == 0
+        
+    - name: Create WireGuard clients directory on EFS
+      file:
+        path: "{{ efs_mount_point }}/wireguard/clients"
+        state: directory
+        mode: '0700'
+      when: final_mount_check.rc == 0
+        
+    - name: Check if WireGuard is already configured on EFS
+      stat:
+        path: "{{ efs_mount_point }}/wireguard/wg0.conf"
+      register: efs_wireguard_config
+      when: final_mount_check.rc == 0
+      
+    - name: Check if local WireGuard config exists
+      stat:
+        path: "{{ wireguard_config_path }}/wg0.conf"
+      register: local_wireguard_config
+      
+    - name: Check if local WireGuard directory is a symlink
+      stat:
+        path: "{{ wireguard_config_path }}"
+      register: wireguard_dir_stat
+      
+    - name: Copy local WireGuard config to EFS (first server)
+      shell: |
+        cp -av {{ wireguard_config_path }}/* {{ efs_mount_point }}/wireguard/
+        chmod -R 700 {{ efs_mount_point }}/wireguard
+      when: final_mount_check.rc == 0 and local_wireguard_config.stat.exists and not efs_wireguard_config.stat.exists and not wireguard_dir_stat.stat.islnk
+      
+    - name: Stop WireGuard service
+      systemd:
+        name: wg-quick@wg0
+        state: stopped
+      when: final_mount_check.rc == 0 and local_wireguard_config.stat.exists and not wireguard_dir_stat.stat.islnk
+      
+    - name: Backup existing WireGuard directory if not a symlink
+      shell: |
+        mv {{ wireguard_config_path }} {{ wireguard_config_path }}.bak.$(date +%s)
+      args:
+        creates: "{{ wireguard_config_path }}.bak"
+      when: final_mount_check.rc == 0 and not wireguard_dir_stat.stat.islnk
+        
+    - name: Create WireGuard symlink to EFS
+      file:
+        src: "{{ efs_mount_point }}/wireguard"
+        dest: "{{ wireguard_config_path }}"
+        state: link
+        force: yes
+      when: final_mount_check.rc == 0
+      
+    - name: Start WireGuard service
+      systemd:
+        name: wg-quick@wg0
+        state: started
+      when: final_mount_check.rc == 0
+      
+    - name: Add EFS mount to fstab for persistence
+      lineinfile:
+        path: /etc/fstab
+        line: "{{ efs_id }}.efs.{{ region }}.amazonaws.com:/ {{ efs_mount_point }} nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport,_netdev 0 0"
+        state: present
+      when: final_mount_check.rc == 0
+      
+    - name: Create EFS mount helper script
+      copy:
+        dest: /usr/local/bin/mount-efs.sh
+        mode: 0755
+        content: |
+          #!/bin/bash
+          # EFS mount helper script for WireGuard
+          
+          EFS_ID="{{ efs_id }}"
+          MOUNT_POINT="{{ efs_mount_point }}"
+          WIREGUARD_PATH="{{ wireguard_config_path }}"
+          REGION=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | grep region | cut -d\" -f4)
+          
+          # Create mount point
+          mkdir -p $MOUNT_POINT
+          
+          # Try to mount using amazon-efs-utils
+          mount -t efs -o tls $EFS_ID:/ $MOUNT_POINT
+          
+          # Check if mount was successful
+          if ! mount | grep -q "$MOUNT_POINT"; then
+            # Try NFS mount
+            mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport $EFS_ID.efs.$REGION.amazonaws.com:/ $MOUNT_POINT
+          fi
+          
+          # Check if mount was successful
+          if mount | grep -q "$MOUNT_POINT"; then
+            # Setup WireGuard directories
+            mkdir -p $MOUNT_POINT/wireguard/clients
+            chmod -R 700 $MOUNT_POINT/wireguard
+            
+            # Check if WireGuard service is running
+            systemctl stop wg-quick@wg0 || true
+            
+            # Check if WireGuard directory is a symlink
+            if [ -d "$WIREGUARD_PATH" ] && [ ! -L "$WIREGUARD_PATH" ]; then
+              # Check if EFS already has WireGuard config
+              if [ ! -f "$MOUNT_POINT/wireguard/wg0.conf" ] && [ -f "$WIREGUARD_PATH/wg0.conf" ]; then
+                # Copy config to EFS
+                cp -a $WIREGUARD_PATH/* $MOUNT_POINT/wireguard/
+              fi
+              
+              # Backup local directory
+              mv $WIREGUARD_PATH ${WIREGUARD_PATH}.bak.$(date +%s)
+            fi
+            
+            # Create symlink
+            ln -sf $MOUNT_POINT/wireguard $WIREGUARD_PATH
+            
+            # Start WireGuard
+            systemctl start wg-quick@wg0 || true
+            
+            # Add to fstab
+            if ! grep -q "$EFS_ID" /etc/fstab; then
+              echo "$EFS_ID.efs.$REGION.amazonaws.com:/ $MOUNT_POINT nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport,_netdev 0 0" >> /etc/fstab
+            fi
+            
+            echo "EFS mounted successfully"
+            exit 0
+          else
+            echo "Failed to mount EFS"
+            exit 1
+          fi
+      when: final_mount_check.rc == 0
+      
+    - name: Create systemd service for automatic EFS mounting
+      copy:
+        dest: /etc/systemd/system/efs-mount.service
+        content: |
+          [Unit]
+          Description=Mount EFS for WireGuard
+          After=network-online.target
+          Wants=network-online.target
+          Before=wg-quick@wg0.service
+          
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/mount-efs.sh
+          RemainAfterExit=yes
+          
+          [Install]
+          WantedBy=multi-user.target
+      when: final_mount_check.rc == 0
+      
+    - name: Enable EFS mount service
+      systemd:
+        name: efs-mount.service
+        enabled: yes
+        daemon_reload: yes
+      when: final_mount_check.rc == 0
+      
+    - name: Report WireGuard status
+      shell: wg show
+      register: wg_status
+      changed_when: false
+      failed_when: false
+      
+    - name: Show WireGuard status
+      debug:
+        var: wg_status.stdout_lines

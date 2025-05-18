@@ -3,7 +3,7 @@
 variable "region" {
   description = "AWS region"
   type        = string
-  default     = "ap-northeast-1"  # Tokyo region
+  default     = "ap-northeast-1" # Tokyo region
 }
 
 variable "aws_profile" {
@@ -35,7 +35,7 @@ variable "vpn_server_instance_type" {
 variable "ssh_key_name" {
   description = "SSH key name for the EC2 instance"
   type        = string
-  default     = null  # Will need to be set in terraform.tfvars
+  default     = null # Will need to be set in terraform.tfvars
 }
 
 # WireGuard Variables
@@ -116,13 +116,13 @@ variable "asg_desired_capacity" {
 variable "network_in_high_threshold" {
   description = "Network inbound threshold to scale out (bytes per second)"
   type        = number
-  default     = 10000000  # 10 MB/s
+  default     = 10000000 # 10 MB/s
 }
 
 variable "network_in_low_threshold" {
   description = "Network inbound threshold to scale in (bytes per second)"
   type        = number
-  default     = 2000000   # 2 MB/s
+  default     = 2000000 # 2 MB/s
 }
 
 # Shared Storage

@@ -1,4 +1,4 @@
-# Auto Scaling Group Variables
+# Auto Scaling Group Variables - Updated with missing variables
 
 variable "project" {
   description = "Project name for resource tagging"
@@ -231,6 +231,19 @@ variable "wireguard_network" {
   description = "Internal network CIDR for WireGuard"
   type        = string
   default     = "10.8.0.0/24"
+}
+
+# Shared Storage Configuration - Added missing variables
+variable "enable_shared_storage" {
+  description = "Enable shared storage using EFS for WireGuard configuration"
+  type        = bool
+  default     = false
+}
+
+variable "efs_id" {
+  description = "ID of the EFS file system for WireGuard configuration (if enable_shared_storage is true)"
+  type        = string
+  default     = ""
 }
 
 # User data variables
