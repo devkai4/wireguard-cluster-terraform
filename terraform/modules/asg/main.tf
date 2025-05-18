@@ -1,6 +1,6 @@
-# Auto Scaling Group Module
+# Auto Scaling Group Module - Fixed user_data handling
 
-# Use datasource to get Ubuntu 22.04 LTS AMI if not specified
+# Use datasource to get Ubuntu 22.04 LTS AMI
 data "aws_ami" "ubuntu" {
   most_recent = true
   owners      = ["099720109477"] # Canonical
@@ -36,7 +36,7 @@ resource "random_string" "suffix" {
 # IAM Role for EC2 instances
 resource "aws_iam_role" "ec2_role" {
   count = var.create_iam_role ? 1 : 0
-  name  = "${var.instance_name}-role-${random_string.suffix.result}"
+  name  = var.iam_role_name != null ? var.iam_role_name : "${var.instance_name}-role-${random_string.suffix.result}"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -102,25 +102,124 @@ resource "aws_iam_role_policy_attachment" "additional_policies" {
   policy_arn = var.iam_policies[count.index]
 }
 
-# User data template for WireGuard setup
+# User data - Use a simpler approach to avoid templatefile issues
 locals {
-  default_user_data_vars = {
-    hostname                = "${var.instance_name}-${var.environment}"
-    install_cloudwatch_agent = "true"
-    install_node_exporter   = "true"
-    install_wireguard       = "true"
-    wireguard_port          = var.wireguard_port
-    wireguard_network       = var.wireguard_network
-    enable_shared_storage   = var.enable_shared_storage ? "true" : "false"
-    efs_id                  = var.efs_id
-    log_group_name          = "/vpn-cluster/${var.environment}/vpn-server"
-    additional_user_data    = ""
-  }
-  
-  user_data_vars = merge(local.default_user_data_vars, var.user_data_vars)
-  
-  # If user_data_base64 is provided, use it; otherwise, generate from template
-  user_data = var.user_data_base64 != null ? var.user_data_base64 : base64encode(templatefile("${path.module}/user_data.tpl", local.user_data_vars))
+  # Use pre-defined simple script to avoid templatefile issues
+  default_user_data = <<-EOF
+#!/bin/bash
+# Initial server setup for VPN server in Auto Scaling Group
+
+set -e
+
+# Log setup progress
+exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+echo "Starting VPN server setup script - $(date)"
+
+# Update and install required packages
+apt-get update
+apt-get upgrade -y
+apt-get install -y \
+    apt-transport-https \
+    ca-certificates \
+    curl \
+    gnupg-agent \
+    software-properties-common \
+    fail2ban \
+    jq \
+    unzip \
+    wireguard \
+    wireguard-tools \
+    nfs-common \
+    qrencode \
+    amazon-efs-utils
+
+# Set up hostname with instance ID for better identification
+INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+hostnamectl set-hostname ${var.instance_name}-$INSTANCE_ID
+
+# Configure fail2ban
+cat > /etc/fail2ban/jail.local << EOFAIL2BAN
+[sshd]
+enabled = true
+port = ssh
+filter = sshd
+logpath = /var/log/auth.log
+maxretry = 3
+bantime = 3600
+EOFAIL2BAN
+
+# Restart fail2ban
+systemctl restart fail2ban
+echo "Fail2ban configured and restarted"
+
+# Enable IP forwarding for WireGuard
+echo "net.ipv4.ip_forward = 1" > /etc/sysctl.d/99-wireguard.conf
+sysctl -p /etc/sysctl.d/99-wireguard.conf
+
+# Create wireguard directories
+mkdir -p /etc/wireguard/clients
+chmod 700 /etc/wireguard
+
+# Generate WireGuard keys
+wg genkey | tee /etc/wireguard/server_private_key | wg pubkey > /etc/wireguard/server_public_key
+chmod 600 /etc/wireguard/server_private_key
+chmod 644 /etc/wireguard/server_public_key
+
+# Create initial WireGuard config
+SERVER_PRIVATE_KEY=$(cat /etc/wireguard/server_private_key)
+cat > /etc/wireguard/wg0.conf << EOFWG
+# WireGuard Server Configuration
+[Interface]
+Address = 10.8.0.1/24
+ListenPort = ${var.wireguard_port}
+PrivateKey = $SERVER_PRIVATE_KEY
+
+# PostUp rules
+PostUp = iptables -A FORWARD -i %i -j ACCEPT
+PostUp = iptables -A FORWARD -o %i -j ACCEPT
+PostUp = iptables -t nat -A POSTROUTING -s ${var.wireguard_network} -o $(ip route | grep default | awk '{print $5}') -j MASQUERADE
+
+# PostDown rules
+PostDown = iptables -D FORWARD -i %i -j ACCEPT
+PostDown = iptables -D FORWARD -o %i -j ACCEPT
+PostDown = iptables -t nat -D POSTROUTING -s ${var.wireguard_network} -o $(ip route | grep default | awk '{print $5}') -j MASQUERADE
+EOFWG
+
+# Start WireGuard
+systemctl enable wg-quick@wg0
+systemctl start wg-quick@wg0
+echo "WireGuard setup completed"
+
+# Create health check script
+cat > /usr/local/bin/wireguard-health-check.sh << 'EOFHC'
+#!/bin/bash
+# Simple health check for WireGuard
+
+# Check if WireGuard interface is up
+if ! ip a show wg0 up > /dev/null 2>&1; then
+    echo "WireGuard interface not up, restarting..."
+    systemctl restart wg-quick@wg0
+    exit 1
+fi
+
+# Check if WireGuard is working
+if ! wg show wg0 > /dev/null 2>&1; then
+    echo "WireGuard not responding, restarting..."
+    systemctl restart wg-quick@wg0
+    exit 1
+fi
+
+echo "WireGuard is running normally"
+exit 0
+EOFHC
+
+chmod +x /usr/local/bin/wireguard-health-check.sh
+
+# Set up cron job for health check
+(crontab -l 2>/dev/null; echo "*/5 * * * * /usr/local/bin/wireguard-health-check.sh > /dev/null 2>&1") | crontab -
+
+echo "VPN server setup completed successfully - $(date)"
+EOF
 }
 
 # Launch Template
@@ -128,7 +227,7 @@ resource "aws_launch_template" "vpn_server" {
   name          = "${var.instance_name}-${var.environment}-${random_string.suffix.result}"
   image_id      = var.ami_id != "" ? var.ami_id : data.aws_ami.ubuntu.id
   instance_type = var.instance_type
-  user_data     = local.user_data
+  user_data     = var.user_data_base64 != null ? var.user_data_base64 : base64encode(local.default_user_data)
   key_name      = var.key_name
 
   # IAM role
