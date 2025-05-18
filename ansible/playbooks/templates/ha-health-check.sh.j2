@@ -1,0 +1,181 @@
+#!/bin/bash
+# WireGuard High Availability health check script
+# This script checks the health of WireGuard in an HA environment
+
+# Log file setup
+LOG_FILE="/var/log/wireguard-ha-health.log"
+exec >> $LOG_FILE 2>&1
+
+echo "==========================================="
+echo "Running HA health check: $(date)"
+
+# Check if WireGuard interface is up
+if ! ip a show wg0 up > /dev/null 2>&1; then
+    echo "ERROR: WireGuard interface wg0 is not up"
+    echo "Attempting to restart WireGuard..."
+    systemctl restart wg-quick@wg0
+    sleep 5
+    
+    if ! ip a show wg0 up > /dev/null 2>&1; then
+        echo "CRITICAL: Failed to bring up WireGuard interface after restart"
+        exit 1
+    else
+        echo "SUCCESS: WireGuard interface restored"
+    fi
+fi
+
+# Check if WireGuard process is running
+if ! wg show wg0 > /dev/null 2>&1; then
+    echo "ERROR: Cannot show WireGuard interface details"
+    echo "Attempting to restart WireGuard..."
+    systemctl restart wg-quick@wg0
+    sleep 5
+    
+    if ! wg show wg0 > /dev/null 2>&1; then
+        echo "CRITICAL: Failed to restore WireGuard process after restart"
+        exit 1
+    else
+        echo "SUCCESS: WireGuard process restored"
+    fi
+fi
+
+# Check EFS mount if in shared storage mode
+if [ "{{ enable_shared_storage }}" = "true" ] && [ -d "{{ efs_mount_point }}" ]; then
+    if ! mount | grep -q "{{ efs_mount_point }}"; then
+        echo "ERROR: EFS is not mounted at {{ efs_mount_point }}"
+        echo "Attempting to mount EFS..."
+        mount -a
+        sleep 3
+        
+        if ! mount | grep -q "{{ efs_mount_point }}"; then
+            echo "CRITICAL: Failed to mount EFS"
+            # Don't exit, WireGuard can still work without EFS in emergency
+        else
+            echo "SUCCESS: EFS mounted successfully"
+        fi
+    else
+        echo "INFO: EFS is mounted correctly"
+    fi
+fi
+
+# Check NLB endpoint file
+if [ ! -f /etc/wireguard/nlb_endpoint ]; then
+    echo "WARNING: NLB endpoint file is missing"
+    
+    # Try to get public DNS from EC2 metadata or set a default
+    INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)
+    REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone | sed 's/[a-z]$//' 2>/dev/null)
+    
+    if [ -n "$INSTANCE_ID" ] && [ -n "$REGION" ]; then
+        echo "INFO: Attempting to get NLB DNS from tags..."
+        # This requires IAM permissions and AWS CLI installed
+        if command -v aws &> /dev/null; then
+            NLB_DNS=$(aws ec2 describe-tags --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=LoadBalancerDNS" --region $REGION --query "Tags[0].Value" --output text 2>/dev/null)
+            
+            if [ -n "$NLB_DNS" ] && [ "$NLB_DNS" != "None" ]; then
+                echo "$NLB_DNS" > /etc/wireguard/nlb_endpoint
+                echo "SUCCESS: Retrieved and saved NLB DNS: $NLB_DNS"
+            fi
+        fi
+    fi
+fi
+
+# Check if client configurations exist
+CLIENT_COUNT=$(find /etc/wireguard/clients -name "*.conf" | wc -l)
+if [ "$CLIENT_COUNT" -eq 0 ]; then
+    echo "WARNING: No client configurations found"
+    
+    # If we have the admin configurations in variables, regenerate them
+    if [ -f /usr/local/bin/gen-client-config.sh ]; then
+        echo "INFO: Attempting to regenerate default client configurations"
+        /usr/local/bin/gen-client-config.sh admin-laptop 10.8.0.2/24
+        /usr/local/bin/gen-client-config.sh admin-phone 10.8.0.3/24
+        echo "SUCCESS: Default client configurations regenerated"
+    fi
+else
+    echo "INFO: Found $CLIENT_COUNT client configuration(s)"
+fi
+
+# Check iptables rules for WireGuard
+if ! iptables -L FORWARD -v | grep -q "wg0"; then
+    echo "ERROR: WireGuard iptables FORWARD rules missing"
+    echo "Attempting to add iptables rules..."
+    
+    iptables -A FORWARD -i wg0 -j ACCEPT
+    iptables -A FORWARD -o wg0 -j ACCEPT
+    
+    if ! iptables -L FORWARD -v | grep -q "wg0"; then
+        echo "CRITICAL: Failed to add iptables FORWARD rules"
+    else
+        echo "SUCCESS: Added iptables FORWARD rules"
+    fi
+fi
+
+if ! iptables -t nat -L POSTROUTING -v | grep -q "{{ wireguard_network }}"; then
+    echo "ERROR: WireGuard iptables NAT rules missing"
+    echo "Attempting to add NAT rules..."
+    
+    WAN_IFACE=$(ip route | grep default | awk '{print $5}')
+    if [ -n "$WAN_IFACE" ]; then
+        iptables -t nat -A POSTROUTING -s {{ wireguard_network }} -o $WAN_IFACE -j MASQUERADE
+        
+        if ! iptables -t nat -L POSTROUTING -v | grep -q "{{ wireguard_network }}"; then
+            echo "CRITICAL: Failed to add iptables NAT rules"
+        else
+            echo "SUCCESS: Added iptables NAT rules"
+        fi
+    else
+        echo "CRITICAL: Could not determine WAN interface"
+    fi
+fi
+
+# Check IP forwarding
+if [ "$(cat /proc/sys/net/ipv4/ip_forward)" != "1" ]; then
+    echo "ERROR: IP forwarding is disabled"
+    echo "Enabling IP forwarding..."
+    
+    echo 1 > /proc/sys/net/ipv4/ip_forward
+    
+    if [ "$(cat /proc/sys/net/ipv4/ip_forward)" != "1" ]; then
+        echo "CRITICAL: Failed to enable IP forwarding"
+    else
+        echo "SUCCESS: Enabled IP forwarding"
+        # Make it permanent
+        echo "net.ipv4.ip_forward = 1" > /etc/sysctl.d/99-wireguard.conf
+        sysctl -p /etc/sysctl.d/99-wireguard.conf
+    fi
+fi
+
+# Check for active peers
+PEER_COUNT=$(wg show wg0 peers | wc -l)
+echo "INFO: Currently $PEER_COUNT peer(s) configured"
+
+# Verify server keys exist
+if [ ! -f /etc/wireguard/server_private_key ] || [ ! -f /etc/wireguard/server_public_key ]; then
+    echo "ERROR: Server keys are missing"
+    
+    if [ -f /etc/wireguard/wg0.conf ]; then
+        # Extract from config if possible
+        PRIVATE_KEY=$(grep "PrivateKey" /etc/wireguard/wg0.conf | awk '{print $3}')
+        
+        if [ -n "$PRIVATE_KEY" ]; then
+            echo "$PRIVATE_KEY" > /etc/wireguard/server_private_key
+            chmod 600 /etc/wireguard/server_private_key
+            
+            # Generate public key
+            echo "$PRIVATE_KEY" | wg pubkey > /etc/wireguard/server_public_key
+            chmod 644 /etc/wireguard/server_public_key
+            
+            echo "SUCCESS: Extracted and recreated server keys"
+        else
+            echo "CRITICAL: Could not recover server keys"
+        fi
+    else
+        echo "CRITICAL: No configuration found to recover keys"
+    fi
+fi
+
+echo "HA health check completed: $(date)"
+echo "==========================================="
+
+exit 0
